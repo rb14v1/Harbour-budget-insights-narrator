@@ -18,8 +18,24 @@ jobs:
       - uses: azure/login@v2
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
+      - name: Allow runner IP through ACR firewall
+        id: runner_ip
+        run: |
+          RUNNER_IP=$(curl -fsS https://api.ipify.org)
+          echo "ip=${RUNNER_IP}" >> "$GITHUB_OUTPUT"
+          az acr network-rule add --name ${{ secrets.ACR_NAME }} --ip-address "${RUNNER_IP}/32" --output none
       - name: Log in to Azure Container Registry
-        run: az acr login --name ${{ secrets.ACR_NAME }}
+        run: |
+          # Network rule changes can take a short while to propagate
+          for attempt in $(seq 1 12); do
+            if az acr login --name ${{ secrets.ACR_NAME }}; then
+              exit 0
+            fi
+            echo "ACR login attempt ${attempt} failed; retrying in 15s..."
+            sleep 15
+          done
+          echo "ERROR: ACR login failed after retries" >&2
+          exit 1
       - name: Determine Dockerfile path
         id: dockerfile
         run: |
@@ -44,3 +60,6 @@ jobs:
           tags: |
             ${{ secrets.ACR_NAME }}.azurecr.io/${{ steps.repo.outputs.name }}:${{ matrix.component }}-latest
             ${{ secrets.ACR_NAME }}.azurecr.io/${{ steps.repo.outputs.name }}:${{ matrix.component }}-${{ github.sha }}
+      - name: Remove runner IP from ACR firewall
+        if: always() && steps.runner_ip.outputs.ip != ''
+        run: az acr network-rule remove --name ${{ secrets.ACR_NAME }} --ip-address "${{ steps.runner_ip.outputs.ip }}/32" --output none || true
